@@ -1,7 +1,7 @@
 extern crate libwhp;
 
-use libwhp::whp::*;
-use libwhp::win_hv_platform::*;
+use libwhp::instruction_emulator::*;
+use libwhp::*;
 
 fn main() {
     let p: Partition = Partition::new().unwrap();
@@ -53,4 +53,52 @@ fn main() {
         gva,
         WHV_TRANSLATE_GVA_FLAGS::WHvTranslateGvaFlagValidateRead,
     ).unwrap();
+
+    let mut callbacks = MyCallbacks {};
+    let _e = Emulator::new(&mut callbacks).unwrap();
+}
+
+struct MyCallbacks {}
+
+impl EmulatorCallbacks for MyCallbacks {
+    fn io_port(
+        &mut self,
+        _context: *mut VOID,
+        _io_access: &mut WHV_EMULATOR_IO_ACCESS_INFO,
+    ) -> HRESULT {
+        S_OK
+    }
+    fn memory(
+        &mut self,
+        _context: *mut VOID,
+        _memory_access: &mut WHV_EMULATOR_MEMORY_ACCESS_INFO,
+    ) -> HRESULT {
+        S_OK
+    }
+    fn get_virtual_processor_registers(
+        &mut self,
+        _context: *mut VOID,
+        _register_names: &[WHV_REGISTER_NAME],
+        _register_values: &mut [WHV_REGISTER_VALUE],
+    ) -> HRESULT {
+        S_OK
+    }
+    fn set_virtual_processor_registers(
+        &mut self,
+        _context: *mut VOID,
+        _register_names: &[WHV_REGISTER_NAME],
+        _register_values: &[WHV_REGISTER_VALUE],
+    ) -> HRESULT {
+        S_OK
+    }
+    fn translate_gva_page(
+        &mut self,
+        _context: *mut VOID,
+        _gva: WHV_GUEST_VIRTUAL_ADDRESS,
+        _translate_flags: WHV_TRANSLATE_GVA_FLAGS,
+        _translation_result: &mut WHV_TRANSLATE_GVA_RESULT_CODE,
+        _gpa: &mut WHV_GUEST_PHYSICAL_ADDRESS,
+    ) -> HRESULT {
+        S_OK
+    }
 }
