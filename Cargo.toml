@@ -5,3 +5,6 @@ authors = ["Alessandro Pilotti <apilotti@cloudbasesolutions.com>"]
 
 [dependencies]
 libwhp = { path = "../libwhp" }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["memoryapi"] }
