@@ -46,7 +46,7 @@ _start(void) {
 	unsigned regs[] = {0, 0, 0, 0};
 	get_cpuid(1, regs);
 	if (regs[2] == CPUID_EXT_HYPERVISOR) {
-		out_string(LOG_PORT, "We haz hypervizor!\n");
+		out_string(LOG_PORT, "Hypervisor present\n");
 	}
 
 	memset(regs, 0, sizeof(regs));

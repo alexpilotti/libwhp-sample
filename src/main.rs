@@ -1,14 +1,15 @@
 extern crate libwhp;
-#[cfg(windows)]
 extern crate winapi;
+
+mod memory;
 
 use libwhp::instruction_emulator::*;
 use libwhp::*;
+use memory::VirtualMemory;
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::{self, Write};
-use winapi::um::memoryapi::{VirtualAlloc, VirtualFree};
-use winapi::um::winnt::{MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
 
 const CPUID_EXT_HYPERVISOR: UINT32 = 1 << 31;
 
@@ -29,8 +30,165 @@ const EFER_LME: u64 = 1 << 8;
 const EFER_LMA: u64 = 1 << 10;
 
 fn main() {
-    let p: Partition = Partition::new().unwrap();
+    check_hypervisor();
 
+    let mut p = Partition::new().unwrap();
+    setup_partition(&mut p);
+
+    let mem_size = 0x200000;
+    let mut payload_mem = VirtualMemory::new(mem_size);
+
+    let guest_address: WHV_GUEST_PHYSICAL_ADDRESS = 0;
+
+    p.map_gpa_range(
+        payload_mem.as_ptr(),
+        guest_address,
+        payload_mem.get_size() as UINT64,
+        WHV_MAP_GPA_RANGE_FLAGS::WHvMapGpaRangeFlagRead
+            | WHV_MAP_GPA_RANGE_FLAGS::WHvMapGpaRangeFlagWrite
+            | WHV_MAP_GPA_RANGE_FLAGS::WHvMapGpaRangeFlagExecute,
+    ).unwrap();
+
+    let mut vp = p.create_virtual_processor(0).unwrap();
+
+    setup_long_mode(&mut vp, &payload_mem);
+    read_payload(&mut payload_mem);
+
+    let vp_ref_cell = RefCell::new(vp);
+
+    let mut callbacks = SampleCallbacks {
+        vp_ref_cell: &vp_ref_cell,
+    };
+    let mut e = Emulator::new(&mut callbacks).unwrap();
+
+    loop {
+        let exit_context = vp_ref_cell.borrow_mut().run().unwrap();
+        match exit_context.ExitReason {
+            WHV_RUN_VP_EXIT_REASON::WHvRunVpExitReasonX64Halt => {
+                println!("All done!");
+                break;
+            }
+            WHV_RUN_VP_EXIT_REASON::WHvRunVpExitReasonMemoryAccess => {
+                handle_mmio_exit(&mut e, &exit_context)
+            }
+            WHV_RUN_VP_EXIT_REASON::WHvRunVpExitReasonX64IoPortAccess => {
+                handle_io_port_exit(&mut e, &exit_context)
+            }
+            WHV_RUN_VP_EXIT_REASON::WHvRunVpExitReasonX64Cpuid => {
+                handle_cpuid_exit(&mut vp_ref_cell.borrow_mut(), &exit_context)
+            }
+            WHV_RUN_VP_EXIT_REASON::WHvRunVpExitReasonX64MsrAccess => {
+                handle_msr_exit(&mut vp_ref_cell.borrow_mut(), &exit_context)
+            }
+            _ => panic!("Unexpected exit type: {:?}", exit_context.ExitReason),
+        };
+    }
+}
+
+fn handle_msr_exit(vp: &mut VirtualProcessor, exit_context: &WHV_RUN_VP_EXIT_CONTEXT) {
+    let msr_access = unsafe { exit_context.anon_union.MsrAccess };
+
+    const NUM_REGS: UINT32 = 3;
+    let mut reg_names: [WHV_REGISTER_NAME; NUM_REGS as usize] = unsafe { std::mem::zeroed() };
+    let mut reg_values: [WHV_REGISTER_VALUE; NUM_REGS as usize] = unsafe { std::mem::zeroed() };
+
+    reg_names[0] = WHV_REGISTER_NAME::WHvX64RegisterRip;
+    reg_names[1] = WHV_REGISTER_NAME::WHvX64RegisterRax;
+    reg_names[2] = WHV_REGISTER_NAME::WHvX64RegisterRdx;
+
+    reg_values[0].Reg64 =
+        exit_context.VpContext.Rip + (exit_context.VpContext.InstructionLengthCr8 & 0xff) as u64;
+
+    let is_write = (msr_access.AccessInfo & 0x1) != 0;
+
+    if is_write {
+        println!(
+            "Got write MSR. Number: {}, Rax: {}, Rdx: {}",
+            msr_access.MsrNumber, msr_access.Rax, msr_access.Rdx
+        );
+    } else {
+        println!("Got read MSR. Number: {}", msr_access.MsrNumber);
+    }
+
+    match msr_access.MsrNumber {
+        1 => {
+            reg_values[1].Reg64 = 1000;
+            reg_values[2].Reg64 = 1001;
+        }
+        _ => {
+            println!("Unknown MSR number: {}", msr_access.MsrNumber);
+        }
+    }
+
+    let mut num_regs_set = NUM_REGS as usize;
+    if is_write {
+        num_regs_set = 1;
+    }
+
+    vp.set_registers(&reg_names[0..num_regs_set], &reg_values[0..num_regs_set])
+        .unwrap();
+}
+
+fn handle_cpuid_exit(vp: &mut VirtualProcessor, exit_context: &WHV_RUN_VP_EXIT_CONTEXT) {
+    let cpuid_access = unsafe { exit_context.anon_union.CpuidAccess };
+    println!("Got CPUID leaf: {}", cpuid_access.Rax);
+
+    const NUM_REGS: UINT32 = 5;
+    let mut reg_names: [WHV_REGISTER_NAME; NUM_REGS as usize] = unsafe { std::mem::zeroed() };
+    let mut reg_values: [WHV_REGISTER_VALUE; NUM_REGS as usize] = unsafe { std::mem::zeroed() };
+
+    reg_names[0] = WHV_REGISTER_NAME::WHvX64RegisterRip;
+    reg_names[1] = WHV_REGISTER_NAME::WHvX64RegisterRax;
+    reg_names[2] = WHV_REGISTER_NAME::WHvX64RegisterRbx;
+    reg_names[3] = WHV_REGISTER_NAME::WHvX64RegisterRcx;
+    reg_names[4] = WHV_REGISTER_NAME::WHvX64RegisterRdx;
+
+    reg_values[0].Reg64 =
+        exit_context.VpContext.Rip + (exit_context.VpContext.InstructionLengthCr8 & 0xff) as u64;
+    reg_values[1].Reg64 = cpuid_access.DefaultResultRax;
+    reg_values[2].Reg64 = cpuid_access.DefaultResultRbx;
+    reg_values[3].Reg64 = cpuid_access.DefaultResultRcx;
+    reg_values[4].Reg64 = cpuid_access.DefaultResultRdx;
+
+    match cpuid_access.Rax {
+        1 => {
+            reg_values[3].Reg64 = CPUID_EXT_HYPERVISOR as UINT64;
+        }
+        _ => {
+            println!("Unknown CPUID leaf: {}", cpuid_access.Rax);
+        }
+    }
+
+    vp.set_registers(&reg_names, &reg_values).unwrap();
+}
+
+fn handle_mmio_exit<T: EmulatorCallbacks>(
+    e: &mut Emulator<T>,
+    exit_context: &WHV_RUN_VP_EXIT_CONTEXT,
+) {
+    println!("Memory access");
+
+    let mem_access_ctx = unsafe { &exit_context.anon_union.MemoryAccess };
+    let _status = e.try_mmio_emulation(
+        std::ptr::null_mut(),
+        &exit_context.VpContext,
+        mem_access_ctx,
+    ).unwrap();
+}
+
+fn handle_io_port_exit<T: EmulatorCallbacks>(
+    e: &mut Emulator<T>,
+    exit_context: &WHV_RUN_VP_EXIT_CONTEXT,
+) {
+    let io_port_access_ctx = unsafe { &exit_context.anon_union.IoPortAccess };
+    let _status = e.try_io_emulation(
+        std::ptr::null_mut(),
+        &exit_context.VpContext,
+        io_port_access_ctx,
+    ).unwrap();
+}
+
+fn setup_partition(p: &mut Partition) {
     let mut property: WHV_PARTITION_PROPERTY = unsafe { std::mem::zeroed() };
     property.ProcessorCount = 1;
     p.set_property(
@@ -65,36 +223,17 @@ fn main() {
     p.set_property_cpuid_results(&cpuid_results).unwrap();
 
     p.setup().unwrap();
+}
 
-    let mem_size = 0x200000;
-    let mem_addr = unsafe {
-        VirtualAlloc(
-            std::ptr::null_mut(),
-            mem_size,
-            MEM_COMMIT | MEM_RESERVE,
-            PAGE_READWRITE,
-        )
-    };
-
-    let guest_address: WHV_GUEST_PHYSICAL_ADDRESS = 0;
-
-    p.map_gpa_range(
-        mem_addr as *const std::os::raw::c_void,
-        guest_address,
-        mem_size as UINT64,
-        WHV_MAP_GPA_RANGE_FLAGS::WHvMapGpaRangeFlagRead
-            | WHV_MAP_GPA_RANGE_FLAGS::WHvMapGpaRangeFlagWrite
-            | WHV_MAP_GPA_RANGE_FLAGS::WHvMapGpaRangeFlagExecute,
-    ).unwrap();
-
-    let vp = p.create_virtual_processor(0).unwrap();
+fn setup_long_mode(vp: &mut VirtualProcessor, payload_mem: &VirtualMemory) {
+    let mem_addr = payload_mem.as_ptr() as u64;
 
     let pml4_addr: u64 = 0x2000;
     let pdpt_addr: u64 = 0x3000;
     let pd_addr: u64 = 0x4000;
-    let pml4: u64 = mem_addr as u64 + pml4_addr;
-    let pdpt: u64 = mem_addr as u64 + pdpt_addr;
-    let pd: u64 = mem_addr as u64 + pd_addr;
+    let pml4: u64 = mem_addr + pml4_addr;
+    let pdpt: u64 = mem_addr + pdpt_addr;
+    let pd: u64 = mem_addr + pd_addr;
 
     unsafe {
         *(pml4 as *mut u64) = PDE64_PRESENT | PDE64_RW | PDE64_USER | pdpt_addr;
@@ -102,10 +241,11 @@ fn main() {
         *(pd as *mut u64) = PDE64_PRESENT | PDE64_RW | PDE64_USER | PDE64_PS;
     }
 
-    const NUM_REGS: UINT32 = 10;
+    const NUM_REGS: UINT32 = 13;
     let mut reg_names: [WHV_REGISTER_NAME; NUM_REGS as usize] = unsafe { std::mem::zeroed() };
     let mut reg_values: [WHV_REGISTER_VALUE; NUM_REGS as usize] = unsafe { std::mem::zeroed() };
 
+    // Setup paging
     reg_names[0] = WHV_REGISTER_NAME::WHvX64RegisterCr3;
     reg_values[0].Reg64 = pml4_addr;
     reg_names[1] = WHV_REGISTER_NAME::WHvX64RegisterCr4;
@@ -120,7 +260,8 @@ fn main() {
         reg_values[4].Segment.Base = 0;
         reg_values[4].Segment.Limit = 0xffffffff;
         reg_values[4].Segment.Selector = 1 << 3;
-        reg_values[4].Segment.Attributes = 11 + (1 << 7) + (1 << 15) + (1 << 13) + (1 << 4);
+        // SegmentType (11) | NonSystemSegment | Present | Long | Granularity
+        reg_values[4].Segment.Attributes = 11 + (1 << 4) + (1 << 7) + (1 << 13) + (1 << 15);
     }
 
     reg_names[5] = WHV_REGISTER_NAME::WHvX64RegisterDs;
@@ -128,7 +269,8 @@ fn main() {
         reg_values[5].Segment.Base = 0;
         reg_values[5].Segment.Limit = 0xffffffff;
         reg_values[5].Segment.Selector = 2 << 3;
-        reg_values[5].Segment.Attributes = 3 + (1 << 7) + (1 << 15) + (1 << 13) + (1 << 4);
+        // SegmentType (3) | NonSystemSegment | Present | Long | Granularity
+        reg_values[5].Segment.Attributes = 3 + (1 << 4) + (1 << 7) + (1 << 13) + (1 << 15);
     }
 
     reg_names[6] = WHV_REGISTER_NAME::WHvX64RegisterEs;
@@ -143,147 +285,35 @@ fn main() {
     reg_names[9] = WHV_REGISTER_NAME::WHvX64RegisterSs;
     reg_values[9] = reg_values[5];
 
-    vp.set_registers(&reg_names, &reg_values).unwrap();
-
-    let mut reg_names: [WHV_REGISTER_NAME; 3 as usize] = unsafe { std::mem::zeroed() };
-    let mut reg_values: [WHV_REGISTER_VALUE; 3 as usize] = unsafe { std::mem::zeroed() };
-
-    reg_names[0] = WHV_REGISTER_NAME::WHvX64RegisterRflags;
-    reg_values[0].Reg64 = 2;
-    reg_names[1] = WHV_REGISTER_NAME::WHvX64RegisterRip;
-    reg_values[1].Reg64 = 0;
-    reg_names[2] = WHV_REGISTER_NAME::WHvX64RegisterRsp;
-    reg_values[2].Reg64 = 2 << 20;
+    reg_names[10] = WHV_REGISTER_NAME::WHvX64RegisterRflags;
+    reg_values[10].Reg64 = 2;
+    reg_names[11] = WHV_REGISTER_NAME::WHvX64RegisterRip;
+    reg_values[11].Reg64 = 0;
+    // Create stack
+    reg_names[12] = WHV_REGISTER_NAME::WHvX64RegisterRsp;
+    reg_values[12].Reg64 = 2 << 20;
 
     vp.set_registers(&reg_names, &reg_values).unwrap();
+}
 
+fn read_payload(mem_addr: &mut VirtualMemory) {
     let mut f = File::open("payload.img").unwrap();
-    let slice = unsafe { std::slice::from_raw_parts_mut(mem_addr as *mut u8, mem_size) };
-    f.read(slice).unwrap();
-    drop(f);
+    f.read(mem_addr.as_slice_mut()).unwrap();
+}
 
-    let mut callbacks = SampleCallbacks { vp: &vp };
-    let mut e = Emulator::new(&mut callbacks).unwrap();
-
-    loop {
-        let exit_context = vp.run().unwrap();
-        // Handle exits
-        if exit_context.ExitReason == WHV_RUN_VP_EXIT_REASON::WHvRunVpExitReasonX64Halt {
-            break;
-        } else if exit_context.ExitReason == WHV_RUN_VP_EXIT_REASON::WHvRunVpExitReasonMemoryAccess
-        {
-            println!("Memory access");
-
-            let mem_access_ctx = unsafe { &exit_context.anon_union.MemoryAccess };
-            let _status = e.try_mmio_emulation(
-                std::ptr::null_mut(),
-                &exit_context.VpContext,
-                mem_access_ctx,
-            ).unwrap();
-        } else if exit_context.ExitReason
-            == WHV_RUN_VP_EXIT_REASON::WHvRunVpExitReasonX64IoPortAccess
-        {
-            let io_port_access_ctx = unsafe { &exit_context.anon_union.IoPortAccess };
-            let _status = e.try_io_emulation(
-                std::ptr::null_mut(),
-                &exit_context.VpContext,
-                io_port_access_ctx,
-            ).unwrap();
-        } else if exit_context.ExitReason
-            == WHV_RUN_VP_EXIT_REASON::WHvRunVpExitReasonUnrecoverableException
-        {
-            panic!("Unrecoverable exception");
-        } else if exit_context.ExitReason == WHV_RUN_VP_EXIT_REASON::WHvRunVpExitReasonX64Cpuid {
-            let cpuid_access = unsafe { exit_context.anon_union.CpuidAccess };
-            println!("Got CPUID leaf: {}", cpuid_access.Rax);
-
-            const NUM_REGS: UINT32 = 5;
-            let mut reg_names: [WHV_REGISTER_NAME; NUM_REGS as usize] =
-                unsafe { std::mem::zeroed() };
-            let mut reg_values: [WHV_REGISTER_VALUE; NUM_REGS as usize] =
-                unsafe { std::mem::zeroed() };
-
-            reg_names[0] = WHV_REGISTER_NAME::WHvX64RegisterRip;
-            reg_names[1] = WHV_REGISTER_NAME::WHvX64RegisterRax;
-            reg_names[2] = WHV_REGISTER_NAME::WHvX64RegisterRbx;
-            reg_names[3] = WHV_REGISTER_NAME::WHvX64RegisterRcx;
-            reg_names[4] = WHV_REGISTER_NAME::WHvX64RegisterRdx;
-
-            reg_values[0].Reg64 = exit_context.VpContext.Rip
-                + (exit_context.VpContext.InstructionLengthCr8 & 0xff) as u64;
-            reg_values[1].Reg64 = cpuid_access.DefaultResultRax;
-            reg_values[2].Reg64 = cpuid_access.DefaultResultRbx;
-            reg_values[3].Reg64 = cpuid_access.DefaultResultRcx;
-            reg_values[4].Reg64 = cpuid_access.DefaultResultRdx;
-
-            match cpuid_access.Rax {
-                1 => {
-                    reg_values[3].Reg64 = CPUID_EXT_HYPERVISOR as UINT64;
-                }
-                _ => {
-                    println!("Unknown CPUID leaf: {}", cpuid_access.Rax);
-                }
-            }
-
-            vp.set_registers(&reg_names, &reg_values).unwrap();
-        } else if exit_context.ExitReason == WHV_RUN_VP_EXIT_REASON::WHvRunVpExitReasonX64MsrAccess
-        {
-            let msr_access = unsafe { exit_context.anon_union.MsrAccess };
-
-            const NUM_REGS: UINT32 = 3;
-            let mut reg_names: [WHV_REGISTER_NAME; NUM_REGS as usize] =
-                unsafe { std::mem::zeroed() };
-            let mut reg_values: [WHV_REGISTER_VALUE; NUM_REGS as usize] =
-                unsafe { std::mem::zeroed() };
-
-            reg_names[0] = WHV_REGISTER_NAME::WHvX64RegisterRip;
-            reg_names[1] = WHV_REGISTER_NAME::WHvX64RegisterRax;
-            reg_names[2] = WHV_REGISTER_NAME::WHvX64RegisterRdx;
-
-            reg_values[0].Reg64 = exit_context.VpContext.Rip
-                + (exit_context.VpContext.InstructionLengthCr8 & 0xff) as u64;
-
-            let is_write = (msr_access.AccessInfo & 0x1) != 0;
-
-            if is_write {
-                println!(
-                    "Got write MSR. Number: {}, Rax: {}, Rdx: {}",
-                    msr_access.MsrNumber, msr_access.Rax, msr_access.Rdx
-                );
-            } else {
-                println!("Got read MSR. Number: {}", msr_access.MsrNumber);
-            }
-
-            match msr_access.MsrNumber {
-                1 => {
-                    reg_values[1].Reg64 = 1000;
-                    reg_values[2].Reg64 = 1001;
-                }
-                _ => {
-                    println!("Unknown MSR number: {}", msr_access.MsrNumber);
-                }
-            }
-
-            let mut num_regs_set = NUM_REGS as usize;
-            if is_write {
-                num_regs_set = 1;
-            }
-
-            vp.set_registers(&reg_names[0..num_regs_set], &reg_values[0..num_regs_set])
-                .unwrap();
-        } else {
-            panic!("Unexpected exit type");
-        }
+fn check_hypervisor() {
+    let capability =
+        get_capability(WHV_CAPABILITY_CODE::WHvCapabilityCodeHypervisorPresent).unwrap();
+    if unsafe { capability.HypervisorPresent } == FALSE {
+        panic!("Hypervisor not present");
     }
-
-    unsafe { VirtualFree(mem_addr, 0, MEM_RELEASE) };
 }
 
-struct SampleCallbacks<'a> {
-    vp: &'a VirtualProcessor<'a>,
+struct SampleCallbacks<'a, 'b: 'a> {
+    vp_ref_cell: &'a RefCell<VirtualProcessor<'b>>,
 }
 
-impl<'a> EmulatorCallbacks for SampleCallbacks<'a> {
+impl<'a, 'b: 'a> EmulatorCallbacks for SampleCallbacks<'a, 'b> {
     fn io_port(
         &mut self,
         _context: *mut VOID,
@@ -302,6 +332,7 @@ impl<'a> EmulatorCallbacks for SampleCallbacks<'a> {
         }
         S_OK
     }
+
     fn memory(
         &mut self,
         _context: *mut VOID,
@@ -311,28 +342,33 @@ impl<'a> EmulatorCallbacks for SampleCallbacks<'a> {
         println!("{:?}", memory_access);
         S_OK
     }
+
     fn get_virtual_processor_registers(
         &mut self,
         _context: *mut VOID,
         register_names: &[WHV_REGISTER_NAME],
         register_values: &mut [WHV_REGISTER_VALUE],
     ) -> HRESULT {
-        self.vp
+        self.vp_ref_cell
+            .borrow()
             .get_registers(register_names, register_values)
             .unwrap();
         S_OK
     }
+
     fn set_virtual_processor_registers(
         &mut self,
         _context: *mut VOID,
         register_names: &[WHV_REGISTER_NAME],
         register_values: &[WHV_REGISTER_VALUE],
     ) -> HRESULT {
-        self.vp
+        self.vp_ref_cell
+            .borrow_mut()
             .set_registers(register_names, register_values)
             .unwrap();
         S_OK
     }
+
     fn translate_gva_page(
         &mut self,
         _context: *mut VOID,
@@ -341,7 +377,10 @@ impl<'a> EmulatorCallbacks for SampleCallbacks<'a> {
         translation_result: &mut WHV_TRANSLATE_GVA_RESULT_CODE,
         gpa: &mut WHV_GUEST_PHYSICAL_ADDRESS,
     ) -> HRESULT {
-        let (translation_result1, gpa1) = self.vp.translate_gva(gva, translate_flags).unwrap();
+        let (translation_result1, gpa1) = self.vp_ref_cell
+            .borrow()
+            .translate_gva(gva, translate_flags)
+            .unwrap();
 
         *translation_result = translation_result1.ResultCode;
         *gpa = gpa1;
