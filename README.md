@@ -4,7 +4,7 @@ A full Windows Hypervisor Platform API Rust sample using
 
 ## Prerequisites
 
-Make sure to have at least: 
+Make sure to have at least:
 
 * Windows 10 build 17134 (or above)
 * Windows Server 1803 (or above)
@@ -53,4 +53,4 @@ cargo run
 * Reads the payload in memory (payload.img)
 * Sets up the MMIO / IO port intruction emulator and related callbacks
 * Starts the vCPU loop
-* Handles various type of exits: CPUID, MSR read / write, IO port, Halt, etc
+* Handles various type of exits: CPUID, MSR read / write, IO port, MMIO, Halt, etc

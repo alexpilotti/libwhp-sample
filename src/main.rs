@@ -35,7 +35,7 @@ fn main() {
     let mut p = Partition::new().unwrap();
     setup_partition(&mut p);
 
-    let mem_size = 0x200000;
+    let mem_size = 0x100000;
     let mut payload_mem = VirtualMemory::new(mem_size);
 
     let guest_address: WHV_GUEST_PHYSICAL_ADDRESS = 0;
@@ -166,8 +166,6 @@ fn handle_mmio_exit<T: EmulatorCallbacks>(
     e: &mut Emulator<T>,
     exit_context: &WHV_RUN_VP_EXIT_CONTEXT,
 ) {
-    println!("Memory access");
-
     let mem_access_ctx = unsafe { &exit_context.anon_union.MemoryAccess };
     let _status = e.try_mmio_emulation(
         std::ptr::null_mut(),
@@ -291,7 +289,7 @@ fn setup_long_mode(vp: &mut VirtualProcessor, payload_mem: &VirtualMemory) {
     reg_values[11].Reg64 = 0;
     // Create stack
     reg_names[12] = WHV_REGISTER_NAME::WHvX64RegisterRsp;
-    reg_values[12].Reg64 = 2 << 20;
+    reg_values[12].Reg64 = payload_mem.get_size() as UINT64;
 
     vp.set_registers(&reg_names, &reg_values).unwrap();
 }
@@ -338,8 +336,22 @@ impl<'a, 'b: 'a> EmulatorCallbacks for SampleCallbacks<'a, 'b> {
         _context: *mut VOID,
         memory_access: &mut WHV_EMULATOR_MEMORY_ACCESS_INFO,
     ) -> HRESULT {
-        println!("memory");
-        println!("{:?}", memory_access);
+        match memory_access.AccessSize {
+            8 => match memory_access.Direction {
+                0 => {
+                    let data = &memory_access.Data as *const _ as *mut u64;
+                    unsafe {
+                        *data = 0x1000;
+                        println!("MMIO read: 0x{:x}", *data);
+                    }
+                }
+                _ => {
+                    let value = unsafe { *(&memory_access.Data as *const _ as *const u64) };
+                    println!("MMIO write: 0x{:x}", value);
+                }
+            },
+            _ => println!("Unsupported MMIO access size: {}", memory_access.AccessSize),
+        }
         S_OK
     }
 
@@ -381,7 +393,6 @@ impl<'a, 'b: 'a> EmulatorCallbacks for SampleCallbacks<'a, 'b> {
             .borrow()
             .translate_gva(gva, translate_flags)
             .unwrap();
-
         *translation_result = translation_result1.ResultCode;
         *gpa = gpa1;
         S_OK

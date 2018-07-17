@@ -38,6 +38,24 @@ static void halt(uint32_t value) {
     asm("hlt" : /* empty */ : "a" (value) : "memory");
 }
 
+static inline void mmio_writeq(uint64_t val, volatile void *addr)
+{
+    asm volatile("mov" "q" " %0, %1": :
+                 "r" (val), "m" (*(volatile uint64_t *)addr) :"memory");
+}
+
+static inline uint64_t mmio_readq(volatile void *addr)
+{
+    uint64_t val;
+    asm volatile("mov" "q" " %1, %0":
+                 "=r" (val): "m" (*(volatile uint64_t *)addr) :"memory");
+    return val;
+}
+
+// .data is located in an unmapped memory area (see payload.ld),
+// generating an MMIO exit when accessed
+unsigned char mmio_buf[1024];
+
 void
 __attribute__((section(".start")))
 _start(void) {
@@ -64,6 +82,9 @@ _start(void) {
 
     uint32_t lo, hi = 0;
     cpu_get_msr(1, &lo, &hi);
+
+    uint64_t data = mmio_readq(mmio_buf);
+    mmio_writeq(data + 1, mmio_buf);
 
     halt(0);
 }

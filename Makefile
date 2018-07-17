@@ -1,4 +1,4 @@
-CFLAGS = -Wall -Wextra -Werror -O2
+CFLAGS = -Wall -Wextra -Werror -O1
 
 .PHONY : all
 all : payload.img
