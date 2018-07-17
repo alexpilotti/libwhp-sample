@@ -41,3 +41,16 @@ Now just build and run the sample:
 ```
 cargo run
 ```
+
+## What does the sample do?
+
+* Checks for the hypervisor presence
+* Creates a partition
+* Sets various partition properties, like the allowed exit types and CPUID results
+* Allocates and maps memory
+* Creates a vCPU
+* Sets up registers for long mode (64 bit)
+* Reads the payload in memory (payload.img)
+* Sets up the MMIO / IO port intruction emulator and related callbacks
+* Starts the vCPU loop
+* Handles various type of exits: CPUID, MSR read / write, IO port, Halt, etc
