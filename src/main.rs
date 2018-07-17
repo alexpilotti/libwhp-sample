@@ -101,19 +101,23 @@ fn handle_msr_exit(vp: &mut VirtualProcessor, exit_context: &WHV_RUN_VP_EXIT_CON
 
     let is_write = (msr_access.AccessInfo & 0x1) != 0;
 
-    if is_write {
-        println!(
-            "Got write MSR. Number: {}, Rax: {}, Rdx: {}",
-            msr_access.MsrNumber, msr_access.Rax, msr_access.Rdx
-        );
-    } else {
-        println!("Got read MSR. Number: {}", msr_access.MsrNumber);
-    }
-
     match msr_access.MsrNumber {
         1 => {
-            reg_values[1].Reg64 = 1000;
-            reg_values[2].Reg64 = 1001;
+            if is_write {
+                println!(
+                    "MSR write. Number: 0x{:x}, Rax: 0x{:x}, Rdx: 0x{:x}",
+                    msr_access.MsrNumber, msr_access.Rax, msr_access.Rdx
+                );
+            } else {
+                let rax = 0x2000;
+                let rdx = 0x2001;
+                reg_values[1].Reg64 = rax;
+                reg_values[2].Reg64 = rdx;
+                println!(
+                    "MSR read. Number: 0x{:x}, Rax: 0x{:x}, Rdx: 0x{:x}",
+                    msr_access.MsrNumber, rax, rdx
+                );
+            }
         }
         _ => {
             println!("Unknown MSR number: {}", msr_access.MsrNumber);
