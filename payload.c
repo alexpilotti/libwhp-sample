@@ -78,10 +78,9 @@ _start(void) {
     out_string_max(LOG_PORT, id, sizeof(id));
     out_string(LOG_PORT, "\n");
 
-    cpu_set_msr(1, 2, 3);
-
     uint32_t lo, hi = 0;
     cpu_get_msr(1, &lo, &hi);
+    cpu_set_msr(1, lo + 1, hi + 1);
 
     uint64_t data = mmio_readq(mmio_buf);
     mmio_writeq(data + 1, mmio_buf);
