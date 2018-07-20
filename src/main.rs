@@ -40,7 +40,7 @@ fn main() {
 
     let guest_address: WHV_GUEST_PHYSICAL_ADDRESS = 0;
 
-    p.map_gpa_range(
+    let _mapping = p.map_gpa_range(
         payload_mem.as_ptr(),
         guest_address,
         payload_mem.get_size() as UINT64,
@@ -311,11 +311,11 @@ fn check_hypervisor() {
     }
 }
 
-struct SampleCallbacks<'a, 'b: 'a> {
-    vp_ref_cell: &'a RefCell<VirtualProcessor<'b>>,
+struct SampleCallbacks<'a> {
+    vp_ref_cell: &'a RefCell<VirtualProcessor>,
 }
 
-impl<'a, 'b: 'a> EmulatorCallbacks for SampleCallbacks<'a, 'b> {
+impl<'a> EmulatorCallbacks for SampleCallbacks<'a> {
     fn io_port(
         &mut self,
         _context: *mut VOID,
