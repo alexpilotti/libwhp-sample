@@ -1,11 +1,9 @@
 extern crate libwhp;
-extern crate winapi;
-
-mod memory;
 
 use libwhp::instruction_emulator::*;
+use libwhp::memory::*;
 use libwhp::*;
-use memory::VirtualMemory;
+
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::prelude::*;
@@ -36,12 +34,12 @@ fn main() {
     setup_partition(&mut p);
 
     let mem_size = 0x100000;
-    let mut payload_mem = VirtualMemory::new(mem_size);
+    let mut payload_mem = VirtualMemory::new(mem_size).unwrap();
 
     let guest_address: WHV_GUEST_PHYSICAL_ADDRESS = 0;
 
     let _mapping = p.map_gpa_range(
-        payload_mem.as_ptr(),
+        &payload_mem,
         guest_address,
         payload_mem.get_size() as UINT64,
         WHV_MAP_GPA_RANGE_FLAGS::WHvMapGpaRangeFlagRead

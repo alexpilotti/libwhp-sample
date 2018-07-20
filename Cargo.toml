@@ -5,6 +5,3 @@ authors = ["Alessandro Pilotti <apilotti@cloudbasesolutions.com>"]
 
 [dependencies]
 libwhp = { git = "https://github.com/insula-rs/libwhp" }
-
-[target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["memoryapi"] }
