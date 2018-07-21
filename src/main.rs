@@ -97,7 +97,7 @@ fn handle_msr_exit(vp: &mut VirtualProcessor, exit_context: &WHV_RUN_VP_EXIT_CON
     reg_values[0].Reg64 =
         exit_context.VpContext.Rip + (exit_context.VpContext.InstructionLengthCr8 & 0xff) as u64;
 
-    let is_write = (msr_access.AccessInfo & 0x1) != 0;
+    let is_write = (msr_access.AccessInfo & 0x1) == 1;
 
     match msr_access.MsrNumber {
         1 => {
@@ -197,7 +197,7 @@ fn setup_partition(p: &mut Partition) {
     ).unwrap();
 
     property = unsafe { std::mem::zeroed() };
-    // X64MsrExit | X64MsrExit | ExceptionExit
+    // X64CpuidExit | X64MsrExit | ExceptionExit
     property.ExtendedVmExits = 7;
 
     p.set_property(
