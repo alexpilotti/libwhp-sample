@@ -95,13 +95,11 @@ fn handle_msr_exit(vp: &mut VirtualProcessor, exit_context: &WHV_RUN_VP_EXIT_CON
     reg_names[2] = WHV_REGISTER_NAME::WHvX64RegisterRdx;
 
     reg_values[0].Reg64 =
-        exit_context.VpContext.Rip + (exit_context.VpContext.InstructionLengthCr8 & 0xff) as u64;
-
-    let is_write = (msr_access.AccessInfo & 0x1) == 1;
+        exit_context.VpContext.Rip + exit_context.VpContext.InstructionLength() as u64;
 
     match msr_access.MsrNumber {
         1 => {
-            if is_write {
+            if msr_access.AccessInfo.IsWrite() == 1 {
                 println!(
                     "MSR write. Number: 0x{:x}, Rax: 0x{:x}, Rdx: 0x{:x}",
                     msr_access.MsrNumber, msr_access.Rax, msr_access.Rdx
@@ -123,7 +121,7 @@ fn handle_msr_exit(vp: &mut VirtualProcessor, exit_context: &WHV_RUN_VP_EXIT_CON
     }
 
     let mut num_regs_set = NUM_REGS as usize;
-    if is_write {
+    if msr_access.AccessInfo.IsWrite() == 1 {
         num_regs_set = 1;
     }
 
@@ -146,7 +144,7 @@ fn handle_cpuid_exit(vp: &mut VirtualProcessor, exit_context: &WHV_RUN_VP_EXIT_C
     reg_names[4] = WHV_REGISTER_NAME::WHvX64RegisterRdx;
 
     reg_values[0].Reg64 =
-        exit_context.VpContext.Rip + (exit_context.VpContext.InstructionLengthCr8 & 0xff) as u64;
+        exit_context.VpContext.Rip + exit_context.VpContext.InstructionLength() as u64;
     reg_values[1].Reg64 = cpuid_access.DefaultResultRax;
     reg_values[2].Reg64 = cpuid_access.DefaultResultRbx;
     reg_values[3].Reg64 = cpuid_access.DefaultResultRcx;
@@ -197,8 +195,11 @@ fn setup_partition(p: &mut Partition) {
     ).unwrap();
 
     property = unsafe { std::mem::zeroed() };
-    // X64CpuidExit | X64MsrExit | ExceptionExit
-    property.ExtendedVmExits = 7;
+    unsafe {
+        property.ExtendedVmExits.set_X64CpuidExit(1);
+        property.ExtendedVmExits.set_X64MsrExit(1);
+        property.ExtendedVmExits.set_ExceptionExit(1);
+    }
 
     p.set_property(
         WHV_PARTITION_PROPERTY_CODE::WHvPartitionPropertyCodeExtendedVmExits,
@@ -257,20 +258,28 @@ fn setup_long_mode(vp: &mut VirtualProcessor, payload_mem: &VirtualMemory) {
 
     reg_names[4] = WHV_REGISTER_NAME::WHvX64RegisterCs;
     unsafe {
-        reg_values[4].Segment.Base = 0;
-        reg_values[4].Segment.Limit = 0xffffffff;
-        reg_values[4].Segment.Selector = 1 << 3;
-        // SegmentType (11) | NonSystemSegment | Present | Long | Granularity
-        reg_values[4].Segment.Attributes = 11 + (1 << 4) + (1 << 7) + (1 << 13) + (1 << 15);
+        let segment = &mut reg_values[4].Segment;
+        segment.Base = 0;
+        segment.Limit = 0xffffffff;
+        segment.Selector = 1 << 3;
+        segment.set_SegmentType(11);
+        segment.set_NonSystemSegment(1);
+        segment.set_Present(1);
+        segment.set_Long(1);
+        segment.set_Granularity(1);
     }
 
     reg_names[5] = WHV_REGISTER_NAME::WHvX64RegisterDs;
     unsafe {
-        reg_values[5].Segment.Base = 0;
-        reg_values[5].Segment.Limit = 0xffffffff;
-        reg_values[5].Segment.Selector = 2 << 3;
-        // SegmentType (3) | NonSystemSegment | Present | Long | Granularity
-        reg_values[5].Segment.Attributes = 3 + (1 << 4) + (1 << 7) + (1 << 13) + (1 << 15);
+        let segment = &mut reg_values[5].Segment;
+        segment.Base = 0;
+        segment.Limit = 0xffffffff;
+        segment.Selector = 2 << 3;
+        segment.set_SegmentType(3);
+        segment.set_NonSystemSegment(1);
+        segment.set_Present(1);
+        segment.set_Long(1);
+        segment.set_Granularity(1);
     }
 
     reg_names[6] = WHV_REGISTER_NAME::WHvX64RegisterEs;
